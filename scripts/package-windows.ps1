@@ -73,9 +73,9 @@ Section "Install"
   CreateShortcut "`$SMPROGRAMS\Ladybird Nightly\Ladybird.lnk" "`$INSTDIR\bin\ladybird.exe"
   no_shortcut:
   FileOpen `$0 "`$INSTDIR\BUILD.txt" w
-  FileWrite `$0 "Ladybird nightly build`r`n"
-  FileWrite `$0 "Version: $Version`r`n"
-  FileWrite `$0 "Upstream commit: $UpstreamSha`r`n"
+  FileWrite `$0 "Ladybird nightly build`$\r`$\n"
+  FileWrite `$0 "Version: $Version`$\r`$\n"
+  FileWrite `$0 "Upstream commit: $UpstreamSha`$\r`$\n"
   FileClose `$0
   WriteUninstaller "`$INSTDIR\Uninstall.exe"
 SectionEnd
@@ -88,3 +88,11 @@ SectionEnd
 "@ | Set-Content -Path $nsiPath -Encoding UTF8
 
 & $makensis /V3 $nsiPath
+if ($LASTEXITCODE -ne 0) {
+  $lineNumber = 1
+  Get-Content -Path $nsiPath | ForEach-Object {
+    "{0,4}: {1}" -f $lineNumber, $_
+    $lineNumber++
+  }
+  exit $LASTEXITCODE
+}
