@@ -460,6 +460,7 @@ jobs:
           RELEASE_TITLE: Ladybird Nightly ${{ needs.resolve-source.outputs.release_date }}
           UPSTREAM_SHA: ${{ needs.resolve-source.outputs.upstream_sha }}
           UPSTREAM_SHORT_SHA: ${{ needs.resolve-source.outputs.upstream_short_sha }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -475,10 +476,10 @@ jobs:
             echo "Assets include Linux .deb packages, macOS .dmg images, Windows setup .exe, portable archives, and SHA256 checksum files."
           } > release-notes.md
 
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
+          if gh release view "$TAG_NAME" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --repo "$REPO" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
           else
-            gh release create "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
+            gh release create "$TAG_NAME" --repo "$REPO" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
           fi
 
-          gh release upload "$TAG_NAME" release-assets/* --clobber
+          gh release upload "$TAG_NAME" release-assets/* --repo "$REPO" --clobber

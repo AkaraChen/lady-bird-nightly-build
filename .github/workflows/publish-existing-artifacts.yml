@@ -1,0 +1,69 @@
+name: Publish Existing Nightly Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: "Workflow run ID that contains ladybird-* artifacts"
+        required: true
+        type: string
+      tag_name:
+        description: "Release tag to create or update"
+        required: true
+        type: string
+      release_title:
+        description: "Release title"
+        required: true
+        type: string
+      upstream_sha:
+        description: "Ladybird upstream commit SHA"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: ladybird-*
+          path: release-assets
+          merge-multiple: true
+          run-id: ${{ inputs.artifact_run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG_NAME: ${{ inputs.tag_name }}
+          RELEASE_TITLE: ${{ inputs.release_title }}
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find release-assets -maxdepth 1 -type f -print | sort
+
+          {
+            echo "Automated Ladybird nightly packages."
+            echo
+            echo "Upstream: LadybirdBrowser/ladybird@$UPSTREAM_SHA"
+            echo "Commit: https://github.com/LadybirdBrowser/ladybird/commit/$UPSTREAM_SHA"
+            echo
+            echo "Assets include Linux .deb packages, macOS .dmg images, Windows setup .exe, portable archives, and SHA256 checksum files."
+          } > release-notes.md
+
+          if gh release view "$TAG_NAME" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --repo "$REPO" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
+          else
+            gh release create "$TAG_NAME" --repo "$REPO" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
+          fi
+
+          gh release upload "$TAG_NAME" release-assets/* --repo "$REPO" --clobber
