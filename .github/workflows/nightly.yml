@@ -1,0 +1,448 @@
+name: Ladybird Nightly Packages
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Ladybird branch, tag, or full commit SHA"
+        required: false
+        default: "master"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ladybird-nightly-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: https://github.com/LadybirdBrowser/ladybird
+  WASM_TOOLS_VERSION: "1.243.0"
+  CCACHE_COMPILERCHECK: "%compiler% -v"
+
+jobs:
+  resolve-source:
+    name: Resolve upstream source
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_sha: ${{ steps.resolve.outputs.sha }}
+      upstream_short_sha: ${{ steps.resolve.outputs.short_sha }}
+      package_version: ${{ steps.meta.outputs.package_version }}
+      release_date: ${{ steps.meta.outputs.release_date }}
+      release_tag_date: ${{ steps.meta.outputs.release_tag_date }}
+    steps:
+      - name: Resolve Ladybird ref
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ref="${{ inputs.upstream_ref || 'master' }}"
+          if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            sha="$(tr '[:upper:]' '[:lower:]' <<< "$ref")"
+          else
+            sha="$(git ls-remote "$UPSTREAM_REPOSITORY" "$ref" | awk 'NR == 1 { print $1 }')"
+            if [ -z "$sha" ]; then
+              sha="$(git ls-remote "$UPSTREAM_REPOSITORY" "refs/heads/$ref" "refs/tags/$ref" | awk 'NR == 1 { print $1 }')"
+            fi
+          fi
+
+          if [ -z "$sha" ]; then
+            echo "Could not resolve upstream ref: $ref" >&2
+            exit 1
+          fi
+
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:10}" >> "$GITHUB_OUTPUT"
+          echo "Resolved $ref to $sha"
+
+      - name: Prepare release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_date="$(date -u +%Y-%m-%d)"
+          release_tag_date="$(date -u +%Y%m%d)"
+          package_version="0.0.${GITHUB_RUN_NUMBER}+git${{ steps.resolve.outputs.short_sha }}"
+
+          {
+            echo "release_date=$release_date"
+            echo "release_tag_date=$release_tag_date"
+            echo "package_version=$package_version"
+          } >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux ${{ matrix.deb_arch }}
+    needs: resolve-source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    container:
+      image: ghcr.io/ladybirdbrowser/ladybird-ci:2026.05.25
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - deb_arch: amd64
+            runner: ubuntu-24.04
+            build_arch: x86_64
+            wasm_arch: x86_64
+            toolchain: GNU
+            cc: gcc
+            cxx: g++
+          - deb_arch: arm64
+            runner: ubuntu-24.04-arm
+            build_arch: arm64
+            wasm_arch: aarch64
+            toolchain: Clang
+            cc: clang
+            cxx: clang++
+    env:
+      LADYBIRD_SOURCE_DIR: ${{ github.workspace }}/ladybird
+      CCACHE_DIR: ${{ github.workspace }}/ladybird/.ccache
+      VCPKG_ROOT: ${{ github.workspace }}/ladybird/Build/vcpkg
+      VCPKG_FORCE_SYSTEM_BINARIES: ${{ matrix.deb_arch == 'arm64' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Clone Ladybird
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$LADYBIRD_SOURCE_DIR"
+          cd "$LADYBIRD_SOURCE_DIR"
+          git remote add origin "$UPSTREAM_REPOSITORY"
+          git fetch --depth=1 origin "${{ needs.resolve-source.outputs.upstream_sha }}"
+          git checkout --detach FETCH_HEAD
+          git submodule update --init --recursive
+
+      - name: Restore build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ladybird/.ccache
+            ladybird/Build/caches/vcpkg-binary-cache
+          key: ladybird-linux-${{ matrix.deb_arch }}-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/vcpkg-configuration.json') }}
+          restore-keys: |
+            ladybird-linux-${{ matrix.deb_arch }}-
+
+      - name: Install wasm-tools
+        shell: bash
+        run: ./scripts/install-wasm-tools.sh Linux ${{ matrix.wasm_arch }}
+
+      - name: Build Ladybird
+        shell: bash
+        working-directory: ${{ env.LADYBIRD_SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip pyyaml requests six
+          python3 Meta/Utils/build_vcpkg.py
+
+          cmake_options=("-DENABLE_CI_BASELINE_CPU=ON" "-DLAGOM_LINK_POOL_SIZE=1")
+          if [ "${{ matrix.deb_arch }}" = "arm64" ]; then
+            cmake_options+=("-DPKG_CONFIG_EXECUTABLE=$(command -v pkg-config)")
+          fi
+
+          cmake --preset Distribution -B Build \
+            "${cmake_options[@]}" \
+            -DPython3_EXECUTABLE="$(command -v python3)" \
+            -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
+            -DCMAKE_CXX_COMPILER="${{ matrix.cxx }}"
+
+          cmake --build Build --parallel 2
+          cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
+
+      - name: Package Linux installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/package-linux.sh \
+            "$LADYBIRD_SOURCE_DIR/Install" \
+            "$GITHUB_WORKSPACE/dist" \
+            "${{ matrix.deb_arch }}" \
+            "${{ needs.resolve-source.outputs.package_version }}" \
+            "${{ needs.resolve-source.outputs.upstream_sha }}"
+          cd "$GITHUB_WORKSPACE/dist"
+          sha256sum ./* > "SHA256SUMS-linux-${{ matrix.deb_arch }}.txt"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-linux-${{ matrix.deb_arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: resolve-source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: macos-15-intel
+            wasm_arch: x86_64
+          - arch: arm64
+            runner: macos-15
+            wasm_arch: aarch64
+    env:
+      LADYBIRD_SOURCE_DIR: ${{ github.workspace }}/ladybird
+      CCACHE_DIR: ${{ github.workspace }}/ladybird/.ccache
+      VCPKG_ROOT: ${{ github.workspace }}/ladybird/Build/vcpkg
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Clone Ladybird
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$LADYBIRD_SOURCE_DIR"
+          cd "$LADYBIRD_SOURCE_DIR"
+          git remote add origin "$UPSTREAM_REPOSITORY"
+          git fetch --depth=1 origin "${{ needs.resolve-source.outputs.upstream_sha }}"
+          git checkout --detach FETCH_HEAD
+          git submodule update --init --recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install \
+            autoconf \
+            autoconf-archive \
+            automake \
+            bash \
+            ccache \
+            cmake \
+            coreutils \
+            libtool \
+            llvm@21 \
+            nasm \
+            ninja \
+            pkg-config \
+            qt \
+            unzip
+          python3 -m pip install --upgrade pip pyyaml requests six
+
+      - name: Restore build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ladybird/.ccache
+            ladybird/Build/caches/vcpkg-binary-cache
+          key: ladybird-macos-${{ matrix.arch }}-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/vcpkg-configuration.json') }}
+          restore-keys: |
+            ladybird-macos-${{ matrix.arch }}-
+
+      - name: Install wasm-tools
+        shell: bash
+        run: ./scripts/install-wasm-tools.sh macOS ${{ matrix.wasm_arch }}
+
+      - name: Build Ladybird
+        shell: bash
+        working-directory: ${{ env.LADYBIRD_SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          python3 Meta/Utils/build_vcpkg.py
+
+          cmake --preset Distribution -B Build \
+            -DENABLE_CI_BASELINE_CPU=ON \
+            -DLAGOM_LINK_POOL_SIZE=1 \
+            -DPython3_EXECUTABLE="$(command -v python3)" \
+            -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+            -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
+            -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}"
+
+          cmake --build Build --parallel "$(sysctl -n hw.logicalcpu)"
+          cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
+
+      - name: Package macOS installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/package-macos.sh \
+            "$LADYBIRD_SOURCE_DIR/Install" \
+            "$GITHUB_WORKSPACE/dist" \
+            "${{ matrix.arch }}" \
+            "${{ needs.resolve-source.outputs.upstream_sha }}"
+          cd "$GITHUB_WORKSPACE/dist"
+          shasum -a 256 ./* > "SHA256SUMS-macos-${{ matrix.arch }}.txt"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: resolve-source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            wasm_arch: x86_64
+            devcmd_arch: x64
+    env:
+      LADYBIRD_SOURCE_DIR: ${{ github.workspace }}\ladybird
+      CCACHE_DIR: ${{ github.workspace }}\ladybird\.ccache
+      VCPKG_ROOT: ${{ github.workspace }}\ladybird\Build\vcpkg
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Clone Ladybird
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git init $env:LADYBIRD_SOURCE_DIR
+          Set-Location $env:LADYBIRD_SOURCE_DIR
+          git remote add origin $env:UPSTREAM_REPOSITORY
+          git fetch --depth=1 origin "${{ needs.resolve-source.outputs.upstream_sha }}"
+          git checkout --detach FETCH_HEAD
+          git submodule update --init --recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install pkgconfiglite nsis --no-progress -y
+          if (!(Get-Command clang-cl.exe -ErrorAction SilentlyContinue)) {
+            choco install llvm --version=20.1.8 --no-progress -y
+          }
+          python -m pip install --upgrade pip pyyaml requests six
+
+      - name: Restore build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ladybird\.ccache
+            ladybird\Build\caches\vcpkg-binary-cache
+          key: ladybird-windows-${{ matrix.arch }}-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/vcpkg-configuration.json') }}
+          restore-keys: |
+            ladybird-windows-${{ matrix.arch }}-
+
+      - name: Install wasm-tools
+        shell: pwsh
+        run: ./scripts/install-wasm-tools.ps1 -Arch ${{ matrix.wasm_arch }}
+
+      - name: Build Ladybird
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vsPath) {
+            throw "Visual Studio with C++ tools was not found"
+          }
+
+          Import-Module (Join-Path $vsPath "Common7\Tools\Microsoft.VisualStudio.DevShell.dll")
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=${{ matrix.devcmd_arch }} -host_arch=x64"
+
+          Set-Location $env:LADYBIRD_SOURCE_DIR
+          python Meta\Utils\build_vcpkg.py
+          cmake --preset Release -B Build -DENABLE_CI_BASELINE_CPU=ON
+          cmake --build Build --parallel $env:NUMBER_OF_PROCESSORS
+          cmake --install Build --prefix "$env:LADYBIRD_SOURCE_DIR\Install"
+
+      - name: Package Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./scripts/package-windows.ps1 `
+            -InstallDir "$env:LADYBIRD_SOURCE_DIR\Install" `
+            -DistDir "$env:GITHUB_WORKSPACE\dist" `
+            -Arch "${{ matrix.arch }}" `
+            -Version "${{ needs.resolve-source.outputs.package_version }}" `
+            -UpstreamSha "${{ needs.resolve-source.outputs.upstream_sha }}"
+
+          Push-Location "$env:GITHUB_WORKSPACE\dist"
+          Get-FileHash -Algorithm SHA256 * |
+            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content "SHA256SUMS-windows-${{ matrix.arch }}.txt"
+          Pop-Location
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ladybird-windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - resolve-source
+      - linux
+      - macos
+      - windows
+    if: ${{ !cancelled() && needs.linux.result == 'success' && needs.macos.result == 'success' && needs.windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: ladybird-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: nightly-${{ needs.resolve-source.outputs.release_tag_date }}
+          RELEASE_TITLE: Ladybird Nightly ${{ needs.resolve-source.outputs.release_date }}
+          UPSTREAM_SHA: ${{ needs.resolve-source.outputs.upstream_sha }}
+          UPSTREAM_SHORT_SHA: ${{ needs.resolve-source.outputs.upstream_short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find release-assets -maxdepth 1 -type f -print | sort
+
+          {
+            echo "Automated Ladybird nightly packages."
+            echo
+            echo "Upstream: LadybirdBrowser/ladybird@$UPSTREAM_SHA"
+            echo "Commit: https://github.com/LadybirdBrowser/ladybird/commit/$UPSTREAM_SHA"
+            echo
+            echo "Assets include Linux .deb packages, macOS .dmg images, Windows setup .exe, portable archives, and SHA256 checksum files."
+          } > release-notes.md
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
+          else
+            gh release create "$TAG_NAME" --title "$RELEASE_TITLE" --notes-file release-notes.md --latest
+          fi
+
+          gh release upload "$TAG_NAME" release-assets/* --clobber
