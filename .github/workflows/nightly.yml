@@ -120,7 +120,8 @@ jobs:
           git submodule update --init --recursive
 
       - name: Restore build caches
-        uses: actions/cache@v4
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             ladybird/.ccache
@@ -160,6 +161,15 @@ jobs:
 
           cmake --build Build --parallel 2
           cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
+
+      - name: Save build caches
+        if: ${{ always() && steps.cache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ladybird/.ccache
+            ladybird/Build/caches/vcpkg-binary-cache
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
 
       - name: Package Linux installer
         shell: bash
@@ -249,7 +259,8 @@ jobs:
           python3 -m pip install --upgrade pip pyyaml requests six
 
       - name: Restore build caches
-        uses: actions/cache@v4
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             ladybird/.ccache
@@ -279,6 +290,15 @@ jobs:
 
           cmake --build Build --parallel "$(sysctl -n hw.logicalcpu)"
           cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
+
+      - name: Save build caches
+        if: ${{ always() && steps.cache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ladybird/.ccache
+            ladybird/Build/caches/vcpkg-binary-cache
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
 
       - name: Package macOS installer
         shell: bash
@@ -349,7 +369,8 @@ jobs:
           python -m pip install --upgrade pip pyyaml requests six
 
       - name: Restore build caches
-        uses: actions/cache@v4
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
           path: |
             ladybird\.ccache
@@ -381,6 +402,15 @@ jobs:
           cmake --preset Release -B Build -DENABLE_CI_BASELINE_CPU=ON
           cmake --build Build --parallel $env:NUMBER_OF_PROCESSORS
           cmake --install Build --prefix "$env:LADYBIRD_SOURCE_DIR\Install"
+
+      - name: Save build caches
+        if: ${{ always() && steps.cache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ladybird\.ccache
+            ladybird\Build\caches\vcpkg-binary-cache
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
 
       - name: Package Windows installer
         shell: pwsh
