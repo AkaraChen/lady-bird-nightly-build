@@ -138,8 +138,14 @@ jobs:
         working-directory: ${{ env.LADYBIRD_SOURCE_DIR }}
         run: |
           set -euo pipefail
-          python3 -m pip install --upgrade pip pyyaml requests six
-          python3 Meta/Utils/build_vcpkg.py
+
+          python_venv="${RUNNER_TEMP:-/tmp}/ladybird-python"
+          python3 -m venv "$python_venv"
+          # shellcheck source=/dev/null
+          . "$python_venv/bin/activate"
+
+          python -m pip install --upgrade pip pyyaml requests six
+          python Meta/Utils/build_vcpkg.py
 
           cmake_options=("-DENABLE_CI_BASELINE_CPU=ON" "-DLAGOM_LINK_POOL_SIZE=1")
           if [ "${{ matrix.deb_arch }}" = "arm64" ]; then
@@ -148,7 +154,7 @@ jobs:
 
           cmake --preset Distribution -B Build \
             "${cmake_options[@]}" \
-            -DPython3_EXECUTABLE="$(command -v python3)" \
+            -DPython3_EXECUTABLE="$(command -v python)" \
             -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
             -DCMAKE_CXX_COMPILER="${{ matrix.cxx }}"
 
