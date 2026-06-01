@@ -64,8 +64,13 @@ Section "Install"
   SetOutPath "`$INSTDIR"
   File /r "$escapedInstallDir\*"
   CreateDirectory "`$SMPROGRAMS\Ladybird Nightly"
-  IfFileExists "`$INSTDIR\bin\Ladybird.exe" 0 no_shortcut
+  IfFileExists "`$INSTDIR\bin\Ladybird.exe" shortcut_upper 0
+  IfFileExists "`$INSTDIR\bin\ladybird.exe" shortcut_lower no_shortcut
+  shortcut_upper:
   CreateShortcut "`$SMPROGRAMS\Ladybird Nightly\Ladybird.lnk" "`$INSTDIR\bin\Ladybird.exe"
+  Goto no_shortcut
+  shortcut_lower:
+  CreateShortcut "`$SMPROGRAMS\Ladybird Nightly\Ladybird.lnk" "`$INSTDIR\bin\ladybird.exe"
   no_shortcut:
   FileOpen `$0 "`$INSTDIR\BUILD.txt" w
   FileWrite `$0 "Ladybird nightly build`r`n"
