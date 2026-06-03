@@ -280,13 +280,32 @@ jobs:
           set -euo pipefail
           python3 Meta/Utils/build_vcpkg.py
 
-          cmake --preset Release -B Build \
-            -DENABLE_CI_BASELINE_CPU=ON \
-            -DLAGOM_LINK_POOL_SIZE=1 \
-            -DPython3_EXECUTABLE="$(command -v python3)" \
-            -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
-            -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
+          cmake_configure_args=(
+            --preset Release
+            -B Build
+            -DENABLE_CI_BASELINE_CPU=ON
+            -DLAGOM_LINK_POOL_SIZE=1
+            -DPython3_EXECUTABLE="$(command -v python3)"
+            -DCMAKE_C_COMPILER="$(xcrun --find clang)"
+            -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)"
             -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}"
+          )
+
+          for attempt in 1 2 3; do
+            if cmake "${cmake_configure_args[@]}"; then
+              break
+            fi
+
+            status=$?
+            if [ "$attempt" -eq 3 ]; then
+              exit "$status"
+            fi
+
+            echo "CMake configure failed with status $status; retrying in $((attempt * 30)) seconds" >&2
+            rm -f Build/CMakeCache.txt
+            rm -rf Build/CMakeFiles
+            sleep $((attempt * 30))
+          done
 
           cmake --build Build --parallel "$(sysctl -n hw.logicalcpu)"
           cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
