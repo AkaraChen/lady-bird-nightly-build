@@ -265,9 +265,9 @@ jobs:
           path: |
             ladybird/.ccache
             ladybird/Build/caches/vcpkg-binary-cache
-          key: ladybird-macos-${{ matrix.arch }}-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/vcpkg-configuration.json') }}
+          key: ladybird-macos-release-${{ matrix.arch }}-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/vcpkg-configuration.json') }}
           restore-keys: |
-            ladybird-macos-${{ matrix.arch }}-
+            ladybird-macos-release-${{ matrix.arch }}-
 
       - name: Install wasm-tools
         shell: bash
@@ -280,7 +280,7 @@ jobs:
           set -euo pipefail
           python3 Meta/Utils/build_vcpkg.py
 
-          cmake --preset Distribution -B Build \
+          cmake --preset Release -B Build \
             -DENABLE_CI_BASELINE_CPU=ON \
             -DLAGOM_LINK_POOL_SIZE=1 \
             -DPython3_EXECUTABLE="$(command -v python3)" \
@@ -290,6 +290,39 @@ jobs:
 
           cmake --build Build --parallel "$(sysctl -n hw.logicalcpu)"
           cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
+
+      - name: Smoke test macOS app launch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app="$LADYBIRD_SOURCE_DIR/Install/bundle/Ladybird.app/Contents/MacOS/Ladybird"
+          smoke_home="$(mktemp -d)"
+          log="$RUNNER_TEMP/ladybird-smoke-${{ matrix.arch }}.log"
+          : > "$log"
+
+          HOME="$smoke_home" "$app" about:blank >"$log" 2>&1 &
+          pid=$!
+
+          for _ in {1..10}; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+              set +e
+              wait "$pid"
+              status=$?
+              set -e
+              echo "Ladybird exited during smoke test with status $status" >&2
+              cat "$log" >&2
+              if [ "$status" -eq 0 ]; then
+                exit 1
+              fi
+              exit "$status"
+            fi
+            sleep 1
+          done
+
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          cat "$log"
 
       - name: Save build caches
         if: ${{ always() && steps.cache-restore.outputs.cache-hit != 'true' }}
