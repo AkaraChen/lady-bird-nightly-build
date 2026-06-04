@@ -204,9 +204,11 @@ jobs:
           - arch: x86_64
             runner: macos-15-intel
             wasm_arch: x86_64
+            vcpkg_triplet: x64-osx-dynamic
           - arch: arm64
             runner: macos-15
             wasm_arch: aarch64
+            vcpkg_triplet: arm64-osx-dynamic
     env:
       LADYBIRD_SOURCE_DIR: ${{ github.workspace }}/ladybird
       CCACHE_DIR: ${{ github.workspace }}/ladybird/.ccache
@@ -309,6 +311,14 @@ jobs:
 
           cmake --build Build --parallel "$(sysctl -n hw.logicalcpu)"
           cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
+
+          app_lib_dir="$LADYBIRD_SOURCE_DIR/Install/bundle/Ladybird.app/Contents/lib"
+          vcpkg_lib_dir="$LADYBIRD_SOURCE_DIR/Build/vcpkg_installed/${{ matrix.vcpkg_triplet }}/lib"
+          if [ ! -d "$vcpkg_lib_dir" ]; then
+            echo "Could not find vcpkg library directory: $vcpkg_lib_dir" >&2
+            exit 1
+          fi
+          find "$vcpkg_lib_dir" -maxdepth 1 \( -type f -o -type l \) -name '*.dylib' -exec cp -P {} "$app_lib_dir/" \;
 
       - name: Smoke test macOS app launch
         shell: bash
