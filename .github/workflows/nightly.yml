@@ -312,13 +312,24 @@ jobs:
           cmake --build Build --parallel "$(sysctl -n hw.logicalcpu)"
           cmake --install Build --strip --prefix "$LADYBIRD_SOURCE_DIR/Install"
 
-          app_lib_dir="$LADYBIRD_SOURCE_DIR/Install/bundle/Ladybird.app/Contents/lib"
+          app_bundle="$LADYBIRD_SOURCE_DIR/Install/bundle/Ladybird.app"
+          app_lib_dir="$app_bundle/Contents/lib"
           vcpkg_lib_dir="$LADYBIRD_SOURCE_DIR/Build/vcpkg_installed/${{ matrix.vcpkg_triplet }}/lib"
           if [ ! -d "$vcpkg_lib_dir" ]; then
             echo "Could not find vcpkg library directory: $vcpkg_lib_dir" >&2
             exit 1
           fi
           find "$vcpkg_lib_dir" -maxdepth 1 \( -type f -o -type l \) -name '*.dylib' -exec cp -P {} "$app_lib_dir/" \;
+
+          app_macos_dir="$app_bundle/Contents/MacOS"
+          for executable in "$app_macos_dir"/*; do
+            [ -f "$executable" ] || continue
+            [ -x "$executable" ] || continue
+
+            if ! otool -l "$executable" | grep -q "path @executable_path/../lib"; then
+              install_name_tool -add_rpath "@executable_path/../lib" "$executable"
+            fi
+          done
 
       - name: Smoke test macOS app launch
         shell: bash
@@ -348,6 +359,20 @@ jobs:
             fi
             sleep 1
           done
+
+          if grep -E "Library not loaded|Reason: tried|dyld\\[[0-9]+\\]" "$log"; then
+            echo "Ladybird logged dynamic loader errors during smoke test" >&2
+            cat "$log" >&2
+            exit 1
+          fi
+
+          helper_pids="$(pgrep -P "$pid" || true)"
+          helper_count="$(printf "%s\n" "$helper_pids" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$helper_count" -eq 0 ]; then
+            echo "Ladybird started without helper processes during smoke test" >&2
+            cat "$log" >&2
+            exit 1
+          fi
 
           kill "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
